@@ -41,6 +41,6 @@
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
         </plugins>
-        <finalName>java-cicd</finalName>
+        <finalName>sample-java-app</finalName>
     </build>
 </project>
