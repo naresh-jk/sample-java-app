@@ -1,0 +1,141 @@
+// 
+// DECLARATIVE JENKINSFILE FOR A MAVEN/JAVA APPLICATION
+// Integrated with Maven, SonarQube, Dependency-Check, and Docker.
+//
+// This pipeline assumes the following are configured in Jenkins:
+// - A global tool configuration 'MAVEN_3'
+// - A SonarQube server named 'SonarQube'
+// - Jenkins Secret ID: 'docker-hub-credentials' (for Docker login)
+//
+// IMPORTANT: This pipeline deploys the application to a local Docker container 
+// running on the Jenkins agent host.
+//
+
+pipeline {
+    // Defines common environment variables
+    environment {
+        // --- Customization Required ---
+        DOCKER_IMAGE = "your-docker-user/sample-java-app:${env.BUILD_ID}" // Change 'your-docker-user'
+        // -----------------------------
+        
+        DOCKER_CRED_ID = "docker-hub-credentials" 
+    }
+
+    // Default agent for all stages unless overridden
+    agent {
+        label 'docker-capable-agent' // This agent must have Docker installed
+    }
+
+    tools {
+        maven 'MAVEN_3' 
+    }
+
+    stages {
+        
+        // ===================================
+        // 1. BUILD, COMPILE, & UNIT TEST (using Apache Maven)
+        // ===================================
+        stage('Build & Unit Test') {
+            agent {
+                docker {
+                    // Use a clean Maven image for compilation/testing
+                    image 'maven:3.8.7-jdk-17'
+                    args '-v $HOME/.m2:/root/.m2' // Cache dependencies
+                }
+            }
+            steps {
+                echo 'Building and running unit tests using Maven...'
+                // 'package' runs compile and test phases
+                sh 'mvn -B clean package -DskipTests' 
+            }
+        }
+        
+        // ===================================
+        // 2. DEPENDENCY VULNERABILITY SCAN (OWASP Dependency-Check)
+        // ===================================
+        stage('Dependency Check') {
+            agent {
+                docker {
+                    image 'maven:3.8.7-jdk-17'
+                }
+            }
+            steps {
+                echo 'Running OWASP Dependency Check for known vulnerabilities...'
+                // Executes the security scan goal defined in pom.xml
+                sh 'mvn org.owasp:dependency-check-maven:check'
+            }
+        }
+
+        // ===================================
+        // 3. CODE QUALITY CHECK (SonarQube)
+        // ===================================
+        stage('Code Quality & Analysis') {
+            steps {
+                echo 'Running SonarQube analysis...'
+                // Requires the SonarQube Scanner plugin
+                withSonarQubeEnv('SonarQube') {
+                    // Running 'install' ensures the JAR is built and ready for subsequent steps
+                    sh 'mvn -B install sonar:sonar -DskipTests'
+                }
+            }
+        }
+        
+        // ===================================
+        // 4. DOCKER BUILD AND PUSH
+        // ===================================
+        stage('Docker Build & Push') {
+            steps {
+                echo 'Building and pushing Docker image...'
+                
+                // Build the Docker Image using the Java-specific Dockerfile (Dockerfile_java)
+                sh "docker build -f Dockerfile_java -t ${DOCKER_IMAGE} ."
+                
+                // Push the Docker Image
+                withCredentials([usernamePassword(credentialsId: DOCKER_CRED_ID, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh "echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin"
+                    sh "docker push ${DOCKER_IMAGE}"
+                }
+            }
+        }
+        
+        // ===================================
+        // 5. DEPLOY TO LOCAL DOCKER CONTAINER
+        // ===================================
+        stage('Deploy') {
+            steps {
+                echo "Deploying ${DOCKER_IMAGE} to local Docker host..."
+                
+                // Stop and remove old container first, ignoring errors if it doesn't exist
+                sh "docker stop java-app-container || true"
+                sh "docker rm java-app-container || true"
+
+                echo "Starting new container..."
+                // Map host port 80 to container port 8080 (Java default, as defined in Dockerfile_java)
+                sh """
+                    docker run -d \\
+                        --name java-app-container \\
+                        -p 80:8080 \\
+                        --restart unless-stopped \\
+                        ${DOCKER_IMAGE}
+                """
+                echo "Deployment complete. Application available on host port 80."
+            }
+        }
+    }
+    
+    // ===================================
+    // POST ACTIONS
+    // ===================================
+    post {
+        always {
+            // Clean up the local image on the Jenkins agent
+            sh "docker rmi ${DOCKER_IMAGE} || true" 
+        }
+        success {
+            echo 'Pipeline finished successfully! All quality and security checks passed.'
+        }
+        failure {
+            echo 'Pipeline failed. Check stage logs for build, security, or quality errors.'
+        }
+    }
+}
